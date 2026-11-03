@@ -1,8 +1,8 @@
-"""Build CPU or GPU packages with bob using the selected local Windows LibTorch SDK."""
+"""Build with Bob's public CPU SDK, or stage a supplied Windows CPU/CUDA SDK."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -100,6 +100,14 @@ def find_sdk(project: Path, mode: str, explicit: Path | None, env: dict[str, str
                      "Install it in the bot pack or use --libtorch. " + reason)
 
 
+def select_sdk(project: Path, mode: str, explicit: Path | None, env: dict[str, str]):
+    # Match a plain Bob build unless the user explicitly selects a CPU SDK.
+    # Invalid overrides must fail rather than silently download a different SDK.
+    if mode == "cpu" and explicit is None and not env.get("LIBTORCH_CPU_ROOT"):
+        return None
+    return find_sdk(project, mode, explicit, env)
+
+
 @contextmanager
 def staged_sdk(project: Path, mode: str, sdk):
     """Keep SDK data private to this build; only a content fingerprint enters bob's hash."""
@@ -153,7 +161,7 @@ def main(argv=None) -> int:
     try:
         args.out_dir = (args.out_dir or project / "bob_build").resolve()
         mode = read_device(project)
-        sdk = find_sdk(project, mode, args.libtorch, os.environ)
+        sdk = select_sdk(project, mode, args.libtorch, os.environ)
         executable = shutil.which(args.bob)
         if not executable:
             raise ValueError("bob was not found. Supply its executable with --bob.")
@@ -171,9 +179,10 @@ def main(argv=None) -> int:
                 target.write_bytes(submission_content(project, source))
             print(f"Build source snapshot: {build_project}", flush=True)
         print(f"Build output: {args.out_dir}", flush=True)
-        with staged_sdk(build_project, mode, sdk):
+        with staged_sdk(build_project, mode, sdk) if sdk else nullcontext():
             platforms = "Windows GPU" if mode == "gpu" else "Windows + Linux CPU"
-            print(f"bob: {platforms} (Windows LibTorch {sdk[1]})", flush=True)
+            sdk_label = f"Windows LibTorch {sdk[1]}" if sdk else "public CPU SDKs downloaded by Docker"
+            print(f"bob: {platforms} ({sdk_label})", flush=True)
             return subprocess.run([executable, "build", "bob.toml", "--out-dir", str(args.out_dir.resolve())],
                                   cwd=build_project, check=False).returncode
     except (OSError, ValueError) as error:

@@ -19,6 +19,7 @@ RUN apt-get update -qq && \
         curl \
         ca-certificates \
         unzip \
+        xz-utils \
         pkg-config \
         wget \
         gnupg \
@@ -81,18 +82,41 @@ RUN xwin --accept-license splat --output /tmp/xwin && \
     echo "=== xwin lib files ===" && \
     find /tmp/xwin -name "*.lib" | head -20
 
-# Stage only the selected Windows SDK; the helper supplies headers and import libraries.
+# Plain Bob builds download the shared CPU SDK. GPU builds require the helper's
+# staged CUDA SDK; runtime DLLs stay in the user's existing bot-pack installation.
 COPY build-support/libtorch/ /tmp/libtorch-win/
 COPY cmake/ReadDevice.cmake /tmp/ReadDevice.cmake
 COPY rlbot/device.txt /tmp/gglbot-device.txt
+ARG LIBTORCH_WINDOWS_CPU_URL=https://github.com/VirxEC/pytorch-archive/releases/download/r-1/botpack_x86_64-windows.tar.xz
+ARG LIBTORCH_WINDOWS_CPU_SHA256=ac228f5b25bb0caa4c8c378aeaa7ee5d9073c5d65945ac4c6f2ead6deae2aa05
 RUN cmake -DDEVICE_FILE=/tmp/gglbot-device.txt -DOUTPUT_FILE=/tmp/gglbot-device \
         -P /tmp/ReadDevice.cmake && \
-    test -f /tmp/libtorch-win/local/lib/torch.lib
+    if [ ! -d /tmp/libtorch-win/local ]; then \
+        if [ "$(cat /tmp/gglbot-device)" != cpu ]; then \
+            echo "GPU builds require a staged Windows CUDA LibTorch SDK. Run scripts/build_bob.py --libtorch <SDK>." >&2; \
+            exit 1; \
+        fi && \
+        curl -fSL --retry 3 -o /tmp/botpack-windows.tar.xz "$LIBTORCH_WINDOWS_CPU_URL" && \
+        echo "$LIBTORCH_WINDOWS_CPU_SHA256  /tmp/botpack-windows.tar.xz" | sha256sum -c - && \
+        mkdir -p /tmp/libtorch-win/local && \
+        tar -xJf /tmp/botpack-windows.tar.xz -C /tmp/libtorch-win/local --strip-components=2 \
+            torch-archive/torch/include \
+            torch-archive/torch/lib/torch.lib \
+            torch-archive/torch/lib/torch_cpu.lib \
+            torch-archive/torch/lib/c10.lib && \
+        rm -f /tmp/botpack-windows.tar.xz; \
+    fi && \
+    test -s /tmp/libtorch-win/local/include/torch/csrc/api/include/torch/version.h && \
+    test -s /tmp/libtorch-win/local/lib/torch.lib && \
+    test -s /tmp/libtorch-win/local/lib/torch_cpu.lib && \
+    test -s /tmp/libtorch-win/local/lib/c10.lib
 
 # Linux CPU needs its platform's bot-pack archive. CUDA builds never fetch CPU archives.
 ARG LIBTORCH_LINUX_CPU_URL=https://github.com/VirxEC/pytorch-archive/releases/download/r-1/botpack_x86_64-linux.tar.xz
+ARG LIBTORCH_LINUX_CPU_SHA256=151319d9f9c9fa432f29e30677a5eb9585577ab1aa2a3d1dd96894ffa131cb61
 RUN if [ "$(cat /tmp/gglbot-device)" = cpu ]; then \
-        curl -fsSL -o /tmp/botpack-linux.tar.xz "$LIBTORCH_LINUX_CPU_URL" && \
+        curl -fSL --retry 3 -o /tmp/botpack-linux.tar.xz "$LIBTORCH_LINUX_CPU_URL" && \
+        echo "$LIBTORCH_LINUX_CPU_SHA256  /tmp/botpack-linux.tar.xz" | sha256sum -c - && \
         mkdir -p /tmp/botpack-linux && \
         tar -xJf /tmp/botpack-linux.tar.xz -C /tmp/botpack-linux && \
         rm -f /tmp/botpack-linux.tar.xz; \
