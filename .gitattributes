@@ -1,0 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Preserve Linux build inputs in Windows checkouts.
+*.Dockerfile text eol=lf
+*.sh text eol=lf
