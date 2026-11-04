@@ -7,6 +7,15 @@ out/
 bob_build/
 rlbot/000-runtime/
 rlbot/*.exe
+# Keep source configs and models; exclude generated package contents.
+rlbot/kilobyte/*
+!rlbot/kilobyte/bot.toml
+!rlbot/kilobyte/POLICY.lt
+!rlbot/kilobyte/SHARED_HEAD.lt
+rlbot/megabyte/*
+!rlbot/megabyte/bot.toml
+!rlbot/megabyte/POLICY.lt
+!rlbot/megabyte/SHARED_HEAD.lt
 *.Dockerfile
 **/*.dll
 **/__pycache__/

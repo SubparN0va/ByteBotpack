@@ -6,6 +6,13 @@
 #include <windows.h>
 #endif
 
+BotProfile CompiledBotProfile() noexcept {
+#ifndef GGLBOT_PROFILE_MEGABYTE
+#error "The build must select a bot profile"
+#endif
+    return GGLBOT_PROFILE_MEGABYTE ? BotProfile::Megabyte : BotProfile::KilobyteReduced;
+}
+
 namespace {
     // Helper functions used to read bot.toml
     inline void ltrim(std::string& s) {
@@ -96,12 +103,19 @@ std::filesystem::path ExecutableDirectory(const char* argumentZero) {
 }
 
 std::filesystem::path PackageDirectory(const char* argumentZero) {
-    auto directory = ExecutableDirectory(argumentZero);
-    if (directory.filename() == "000-runtime") directory = directory.parent_path();
+    auto directory = LauncherDirectory(argumentZero);
     // bob writes its authoritative configuration at the shared package root,
     // one level above the platform-specific launcher. Local builds are flat.
     if (!std::filesystem::is_regular_file(directory / "bot.toml") &&
         std::filesystem::is_regular_file(directory.parent_path() / "bot.toml"))
         directory = directory.parent_path();
+    return directory;
+}
+
+std::filesystem::path LauncherDirectory(const char* argumentZero) {
+    auto directory = ExecutableDirectory(argumentZero);
+    if (directory.filename() == "000-runtime") directory = directory.parent_path();
+    // Bob's platform split keeps this directory, but drops shared asset folders.
+    // Local builds use the same layout beside their launcher.
     return directory;
 }

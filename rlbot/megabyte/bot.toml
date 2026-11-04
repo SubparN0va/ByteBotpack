@@ -1,0 +1,17 @@
+[settings]
+agent_id = "SubparNova/Megabyte"
+hivemind = true
+name = "Megabyte"
+loadout_file = "loadout.toml"
+root_dir = "."
+run_command = "GGLBot.exe"
+run_command_linux = "./GGLBot"
+logo_file = "logo.png"
+
+[details]
+description = "A multi mode bot that likes to pass and miss boost pads"
+fun_fact = "After my initial practice bot, this is the first real bot I've made, and it's been a work in progress since 2025"
+developer = "SubparNova"
+language = "C++"
+tags = ["1v1", "2v2", "3v3", "3v2", "2v1"]
+source_link = "https://github.com/SubparN0va/ByteBotpack"

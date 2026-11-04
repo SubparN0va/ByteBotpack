@@ -29,7 +29,7 @@ struct SkillRow {
     std::string name;
     int active = DefaultSkillLevel;
     SkillChoice pending;
-    SkillChoiceMode activeMode = SkillChoiceMode::Megabyte;
+    SkillChoiceMode activeMode = SkillChoiceMode::SelectSkill;
 };
 
 /** Shared control channel; the UI never touches models or game-state objects. **/
@@ -50,12 +50,14 @@ struct SkillControl {
     void Publish(unsigned player, SkillTelemetry value);
 };
 
-/** Native Windows panel and tray icon. Closing the panel leaves a running bot alone. **/
+/** Native rank panel. Closing the panel leaves a running bot alone. **/
 class SkillWindow {
 public:
     SkillWindow(std::shared_ptr<SkillControl> control, bool standalone = false);
     ~SkillWindow();
     void Wait();
+    /** Pumps the Linux window on the main thread; false once it has closed. **/
+    bool Pump();
     SkillWindow(const SkillWindow&) = delete;
     SkillWindow& operator=(const SkillWindow&) = delete;
 private:

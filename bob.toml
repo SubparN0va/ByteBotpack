@@ -1,7 +1,17 @@
 [[config]]
-project_name = "ByteBotpack"
-bot_configs = ["rlbot/bot.toml"]
+project_name = "KilobyteReduced"
+bot_configs = ["rlbot/kilobyte/bot.toml"]
 
 [config.builder_config]
 builder_type = "custom"
 dockerfile = "cpp.Dockerfile"
+values = { profile = "kilobyte" }
+
+[[config]]
+project_name = "Megabyte"
+bot_configs = ["rlbot/megabyte/bot.toml"]
+
+[config.builder_config]
+builder_type = "custom"
+dockerfile = "cpp.Dockerfile"
+values = { profile = "megabyte" }

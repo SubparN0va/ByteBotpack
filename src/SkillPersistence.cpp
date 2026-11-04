@@ -98,11 +98,11 @@ std::optional<int> ReadSavedSkill(const std::filesystem::path& package) {
 }
 
 std::string SkillBotName(int level) {
-    if (level == 0) return "Byte [Auto]";
-    if (level == 21) return "Byte [GC III]";
-    if (level == 22) return "Byte [SSL]";
-    if (level == 23) return "Byte [SSL+]";
-    return "Byte [" + SkillLabel(level) + "]";
+    if (level == 0) return "Kilobyte[Auto]";
+    if (level == MaxSelectableRank) return "Kilobyte";
+    auto label = SkillLabel(level);
+    if (label.starts_with("Champion ")) label.replace(0, 8, "Champ");
+    return "Kilobyte[" + label + "]";
 }
 
 std::string ChoiceBotName(SkillChoice choice) {
@@ -121,16 +121,9 @@ bool BotNameMatches(const std::string& actual,const std::string& expected) {
 }
 
 std::optional<int> SkillFromBotName(const std::string& name) {
-    for(int mode=0;mode<3;++mode)
-        if(BotNameMatches(name,SkillChoiceLabel(static_cast<SkillChoiceMode>(mode)))) return 21+mode;
-    // RLBot adds duplicate-name suffixes, e.g. Byte [Gold II] (2).
-    const auto start = name.find('['), end = name.find(']', start);
-    if (start == std::string::npos || end == std::string::npos) return {};
-    const auto rank = name.substr(start, end - start + 1);
-    for (int level = 0; level <= MaxSkillLevel; ++level) {
-        const auto expected = SkillBotName(level);
-        if (expected.substr(expected.find('[')) == rank) return level;
-    }
+    for (int level = 0; level <= MaxSelectableRank; ++level)
+        if (BotNameMatches(name, SkillBotName(level)) ||
+            BotNameMatches(name, "Kilobyte[" + SkillLabel(level) + "]")) return level;
     return {};
 }
 
@@ -143,23 +136,18 @@ bool IsManualRunCommand(const std::string& runCommand) {
     return model!="off";
 }
 
-SkillChoice ChoiceForBot(const std::string& name,const std::string& runCommand,SkillChoice fallback) {
-    for(int mode=0;mode<3;++mode) {
-        const auto preset=static_cast<SkillChoiceMode>(mode);
-        if(BotNameMatches(name,SkillChoiceLabel(preset))) return {preset,fallback.rank};
+SkillChoice ChoiceForBot(const std::string& name,const StartupOptions& startup,SkillChoice fallback) {
+    // A later Apply is intentional even if the launch command still contains
+    // the original --skill, or the process still inherits GGLBOT_SKILL.
+    if (startup.matchRank) {
+        if (const auto rank = SkillFromBotName(name)) return SkillChoice::FromLevel(*rank);
     }
-    const auto level=SkillFromBotName(name).value_or(fallback.Level());
-    const std::regex marker(R"((?:^|\s)--byte-skill-mode=([0-3])(?=\s|$))");
-    std::smatch match;
-    if(std::regex_search(runCommand,match,marker)) {
-        const auto mode=static_cast<SkillChoiceMode>(match.str(1)[0]-'0');
-        SkillChoice choice{mode,mode==SkillChoiceMode::SelectSkill?level:fallback.rank};
-        if(choice.rank<=MaxSelectableRank && choice.Level()==level) return choice;
-    }
-    return fallback.Level()==level?fallback:SkillChoice::FromLevel(level);
+    if (startup.explicitSkill) return SkillChoice::FromLevel(startup.skillLevel);
+    return SkillChoice::FromLevel(SkillFromBotName(name).value_or(fallback.rank));
 }
 
 std::string RunCommandWithChoice(const std::string& runCommand,SkillChoice choice) {
+    if(choice.mode != SkillChoiceMode::SelectSkill) throw std::invalid_argument("Only Kilobyte ranks can respawn");
     choice.Level();
     const std::regex marker(R"((?:^|\s)--byte-skill-mode=[0-3](?=\s|$))");
     auto command=std::regex_replace(runCommand,marker,"");
@@ -197,37 +185,7 @@ std::string ConfigWithSkillName(const std::string& config, SkillChoice choice) {
 }
 
 SkillChoice ReadSavedChoice(const std::filesystem::path& package) {
-    int level=DefaultSkillLevel;
-    try {
-        SelectionLock lock(package);
-        // Both files describe one choice. Releasing the lock between reads can
-        // combine an old level with a different process's newly saved model.
-        try { level=ReadSavedSkillFile(package).value_or(DefaultSkillLevel); }
-        catch(const std::exception&) {}
-        std::istringstream input(ReadText(package/"skill-choice.txt"));
-        int mode,rank;
-        if(input>>mode>>rank && (input>>std::ws).eof()) {
-            const int previousRank=rank;
-            if(rank==23) rank=MaxSelectableRank;
-            SkillChoice choice{static_cast<SkillChoiceMode>(mode),rank};
-            // Legacy launchers may update only skill-level.txt. Never restore
-            // selector metadata that disagrees with the authoritative level.
-            if(choice.Level()==level || (mode==int(SkillChoiceMode::SelectSkill) && previousRank==23 && level==23)) return choice;
-        }
-    } catch(const std::exception&) {}
-    return SkillChoice::FromLevel(level);
-}
-
-std::string SyncManualModelName(const std::filesystem::path& package, SkillChoiceMode model) {
-    try {
-        if(model!=SkillChoiceMode::Byte && model!=SkillChoiceMode::Kilobyte && model!=SkillChoiceMode::Megabyte)
-            throw std::invalid_argument("Manual mode requires a named model");
-        SelectionLock lock(package);
-        const auto path=package/"bot.toml";
-        // Preserve GUI preferences and avoid rewriting an already matching file.
-        WriteText(path,ConfigWithSkillName(ReadText(path),SkillChoice{model}));
-    } catch(const std::exception& error) {return error.what();}
-    return {};
+    return SkillChoice::FromLevel(ReadSavedSkill(package).value_or(DefaultSkillLevel));
 }
 
 std::string SaveSkillSelection(const std::filesystem::path& package, int level) {
@@ -237,13 +195,13 @@ std::string SaveSkillSelection(const std::filesystem::path& package, int level) 
 
 std::string SaveSkillChoice(const std::filesystem::path& package, SkillChoice choice) {
     try {
+        if(choice.mode != SkillChoiceMode::SelectSkill) throw std::invalid_argument("Only Kilobyte ranks can be saved");
         const auto level=choice.Level();
         SelectionLock lock(package);
         // Only explicit choices are persisted. Auto's changing effective level
         // never reaches this function, so an Auto selection stays Auto next match.
         ChoiceBotName(choice);
         WriteText(package / "skill-level.txt", std::to_string(level));
-        WriteText(package / "skill-choice.txt", std::to_string(int(choice.mode))+" "+std::to_string(choice.rank));
         try {
             const auto path = package / "bot.toml";
             WriteText(path, ConfigWithSkillName(ReadText(path), choice));
@@ -268,7 +226,10 @@ SavedBotSkills ReadSavedBotSkills(const std::filesystem::path& package) {
             if(selectors) {
                 int rank;if(!(input>>rank)) return {};
                 if(rank==23) rank=MaxSelectableRank;
-                choice={static_cast<SkillChoiceMode>(value),rank};
+                if(value==0) rank=21;
+                else if(value==1 || value==2) rank=MaxSelectableRank;
+                else if(value!=3) return {};
+                choice=SkillChoice::FromLevel(rank);
             } else choice=SkillChoice::FromLevel(value);
             choice.Level();
             if(!levels.emplace(std::make_pair(slot,team),choice).second) return {};
@@ -281,6 +242,7 @@ std::string SaveBotSkills(const std::filesystem::path& package,const SavedBotSki
     try {
         SelectionLock lock(package);std::ostringstream text;text<<"BYTE_SKILL_ROSTER_2\n";
         for(const auto& [key,choice]:levels) {
+            if(choice.mode != SkillChoiceMode::SelectSkill) throw std::invalid_argument("Only Kilobyte ranks can be saved");
             choice.Level();
             if(key.first>63 || key.second>1) throw std::invalid_argument("Invalid per-bot rank");
             text<<key.first<<' '<<key.second<<' '<<int(choice.mode)<<' '<<choice.rank<<'\n';

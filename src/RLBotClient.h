@@ -26,8 +26,10 @@ struct SharedBotContext {
     std::shared_ptr<RLGC::ObsBuilder> obs;
     std::shared_ptr<RLGC::ActionParser> act;
     /** Loaded once so rank changes never read model files on the game thread. **/
-    std::array<std::shared_ptr<GGL::InferUnit>, 3> inferUnits;
+    std::array<std::shared_ptr<GGL::InferUnit>, 2> inferUnits;
     RLBotParams params;
+    /** Retains explicit startup rank intent separately from the saved default. **/
+    StartupOptions startup;
     /** Locks every controlled car to the explicit full-strength startup model. **/
     std::optional<SkillChoice> manualChoice;
     std::shared_ptr<SkillControl> control;

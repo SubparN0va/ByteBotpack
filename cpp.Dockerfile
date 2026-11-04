@@ -21,6 +21,7 @@ RUN apt-get update -qq && \
         unzip \
         xz-utils \
         pkg-config \
+        libgtk-3-dev \
         wget \
         gnupg \
         lsb-release \
@@ -127,7 +128,7 @@ COPY . /src
 
 RUN if [ "$(cat /tmp/gglbot-device)" = cpu ]; then \
         cmake -S . -B build-linux -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DGGLBOT_DEVICE=cpu -DBUILD_TESTING=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DGGLBOT_PROFILE={profile} -DGGLBOT_DEVICE=cpu -DBUILD_TESTING=OFF \
             -DGGLBOT_DEPLOY_DIR=/out/x86_64-unknown-linux-gnu \
             -DLIBTORCH_CPU_ROOT=/tmp/botpack-linux/torch-archive/torch && \
         cmake --build build-linux --target GGLBot --parallel "$(nproc)"; \
@@ -139,14 +140,19 @@ RUN device="$(cat /tmp/gglbot-device)" && \
     else root=LIBTORCH_CPU_ROOT; core=GGLBotCoreCPU; fi && \
     cmake -S . -B build-win -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchain-msvc.cmake \
-        -DCMAKE_BUILD_TYPE=Release -DGGLBOT_DEVICE="$device" -DBUILD_TESTING=OFF \
+        -DCMAKE_BUILD_TYPE=Release -DGGLBOT_PROFILE={profile} -DGGLBOT_DEVICE="$device" -DBUILD_TESTING=OFF \
         -DGGLBOT_DEPLOY_DIR=/out/x86_64-pc-windows-msvc \
         -D"$root"=/tmp/libtorch-win/local && \
     cmake --build build-win --target GGLBot --parallel "$(nproc)"
 
-# Models and configuration belong to the shared root, where bob writes bot.toml.
-# Never flatten same-named policies or put a second bot.toml under each platform.
-RUN cmake -DSOURCE_PACKAGE=/src/rlbot -DDEST_PACKAGE=/out -P /src/cmake/StagePackage.cmake
+# Bob split keeps nested assets only inside platform directories. Configuration
+# stays at the shared root; models travel with each launcher.
+RUN platforms=x86_64-pc-windows-msvc && \
+    if [ "$(cat /tmp/gglbot-device)" = cpu ]; then \
+        platforms="$platforms;x86_64-unknown-linux-gnu"; \
+    fi && \
+    cmake -DSOURCE_PACKAGE=/src/rlbot -DDEST_PACKAGE=/out \
+        -DBOT_PROFILE={profile} -DPACKAGE_PLATFORMS="$platforms" -P /src/cmake/StagePackage.cmake
 
 # Sorting puts the core before the launcher, which bob uses as the entry point.
 # Export only platforms produced by this build.

@@ -2,42 +2,69 @@
 
 <img src="rlbot/logo.png" alt="Byte" width="420">
 
-Byte, Kilobyte and Megabyte for **RLBot v5**, with an optional rank selector. Supports 1v1, 2v2 and 3v3.
+Megabyte and Kilobyte for **RLBot v5**. Supports 1v1, 2v2 and 3v3.
 
 ## Play
 
-Add the `bot.toml` at the root of the built package to RLBot. Keep the complete
-bot folder together. For a native build deployed into this checkout, use
-`rlbot/bot.toml`. The default is full-strength Megabyte with the selector enabled.
-Choose Byte, Kilobyte or Megabyte at full strength, or Select Skill for estimated
-Bronze I through SSL difficulty. Auto tries to keep the score even. Changes apply with **Apply &
-respawn**.
+Add the two package-root `bot.toml` files to RLBot. Keep each complete bot folder
+together:
+
+- **Megabyte** runs at full strength without opening a GUI.
+- **Kilobyte** allows for selecting a custom difficulty. Once the bot is started, the rank selector opens.
+By default, it plays at a Champ I level. Choose Auto or Bronze I through SSL, then
+**Apply & respawn** for the changes to take effect.
+  Reduced ranks display as `Kilobyte[Champ I]`, for example. SSL displays simply
+  as **Kilobyte**, without a rank suffix. Auto tries to keep the score even.
+
+Fresh packages retain the `Kilobyte[Champ I]` name until a rank is explicitly
+saved/applied. Rank labels are provisional
+estimates, not verified human ranks. Each Kilobyte car can have its own rank;
+Megabyte cars are excluded from the selector.
 
 CPU inference is the default on Windows and Linux. It uses the CPU runtime already
 installed with the official RLBot botpack. On Windows this is normally
 `%LOCALAPPDATA%/RLBot5/bots/torch-archive/torch`; set `LIBTORCH_CPU_ROOT` to that
-`torch` directory if it is installed elsewhere. Byte does not download another
-runtime when it starts. The selector window is available on Windows.
+`torch` directory if it is installed elsewhere. The bots do not download another
+runtime when they start.
 
 GPU inference requires a separate Windows build and a compatible CUDA LibTorch
 installation; see the GPU build instructions below.
 
-## Run without the selector
+## Startup options
 
-By default, the selector window opens when the bot starts. To disable it, append
-`--manual=Byte`, `--manual=Kilobyte`, or `--manual=Megabyte` to the existing
-`run_command` in the package-root `bot.toml`. Preserve the executable path that
-Bob generated. For example, a Windows Bob package can use:
+Each executable's profile is fixed at build time with `GGLBOT_PROFILE` (`kilobyte`
+or `megabyte`), independently of the display name or Bob's generated launch
+command. Bob selects this automatically for each bot. There is no model selector
+or `--manual` option.
 
-```toml
-run_command = 'x86_64-pc-windows-msvc\GGLBot.exe --manual=Megabyte'
-```
+Kilobyte supports `--skill=0` through `--skill=22`, `--no-ui`, `--debug` and
+`--ui-only` (save a default before a match). `GGLBOT_SKILL` supplies a
+rank when `--skill` is absent; saved preferences are the final fallback. Append
+options to the existing Bob-generated executable path in `run_command` or
+`run_command_linux`. Use `--controller` to reopen the live Linux rank window after
+closing it; closing the window leaves the playing bot running.
+Megabyte ignores rank preferences and environment overrides, and rejects rank/GUI
+arguments. Both profiles support `--check-models` for an offline inference check.
 
-Each named model runs at full strength without the selector. Replace the argument
-with `--manual=Off`, or remove it, to enable the selector again. For Linux CPU
-packages, append the same argument to the existing `run_command_linux`.
+## Linux selector
 
-Rank labels are provisional estimates, not verified human ranks.
+The Linux controller uses [GTK 3](https://docs.gtk.org/gtk3/) in a desktop session
+(X11 or Wayland). Install your distribution's GTK 3 runtime if it is missing.
+On Ubuntu 24.04 this is `sudo apt install libgtk-3-0t64`; older Debian/Ubuntu
+releases call the package `libgtk-3-0`.
+
+Start Kilobyte[Champ I] normally in RLBot to open the live rank selector. It has
+the same per-car pending ranks, Auto, Apply & respawn, and saved defaults
+as Windows. The controller runs separately from inference, so applying ranks can
+restart bots without closing the panel. Only one controller opens per package
+and RLBot server.
+
+`GGLBot --ui-only` opens the default selector without loading Torch. On a headless
+machine, use `--no-ui` with a saved rank or `--skill=N`. The Linux GUI executable
+is `000-runtime/ByteSkillUI` beside the platform launcher; Bob split preserves it.
+GTK is linked only into that executable; Megabyte and headless inference do not
+require GTK. Native Linux builds need the development package `libgtk-3-dev` and
+`pkg-config`; the Bob Dockerfile installs them automatically.
 
 ## Build for the botpack
 
@@ -47,8 +74,10 @@ From a source checkout with Bob and Docker (Linux containers) installed, run:
 bob build bob.toml --out-dir "path/to/build-output"
 ```
 
-The package is written to `path/to/build-output/ByteBotpack/`. Without `--out-dir`,
-Bob uses `bob_build/ByteBotpack/` in this repository.
+Bob writes `KilobyteReduced/bot.toml` and `Megabyte/bot.toml` under the output
+directory. KilobyteReduced is the first/default project in `bob.toml`. Without
+`--out-dir`, Bob uses `bob_build/`. Each project has a separate configuration,
+fixed profile and model pair; Bob can safely rewrite both launch commands.
 
 The checked-in `rlbot/device.txt` selects `cpu`. A fresh CPU build automatically
 downloads the Windows and Linux SDKs from the public
@@ -94,6 +123,38 @@ built package does not switch CPU/GPU; rebuild from source. A GPU build does not
 fall back to CPU, and plain Bob GPU builds require a staged CUDA SDK. Keep `cpu`
 in the source configuration submitted to the botpack.
 
-The six inference files are grouped under `rlbot/models/byte`, `kilobyte` and
-`megabyte` in the source checkout, or `models/` in a built package. Their checksums
-are in the [model manifest](rlbot/models/manifest.json).
+## Native build and validation
+
+For a native CMake build, set `GGLBOT_PROFILE=kilobyte` (the default) or
+`GGLBOT_PROFILE=megabyte`, and optionally `GGLBOT_DEPLOY_DIR`. Use separate output
+directories for the two profiles. The default deploy directories are
+`rlbot/kilobyte/` and `rlbot/megabyte/`; add their `bot.toml` files after building.
+
+Each source bot folder (`rlbot/kilobyte/` and `rlbot/megabyte/`) contains its
+`bot.toml`, `POLICY.lt`, and `SHARED_HEAD.lt`. Shared assets live directly under
+`rlbot/`. There is no Byte policy.
+Each built package contains only its own policy pair, beside the launcher:
+inside each platform folder for Bob builds, or at the package root for flat
+native builds. This location survives `bob split`, which drops shared root
+directories while retaining platform folders and individual root files.
+
+Validate both packages for each platform after splitting:
+
+```text
+bob split "path/to/build-output"
+python scripts/check_package.py "path/to/build-output_x86_64-windows/KilobyteReduced"
+python scripts/check_package.py "path/to/build-output_x86_64-windows/Megabyte"
+python scripts/check_package.py "path/to/build-output_x86_64-linux/KilobyteReduced"
+python scripts/check_package.py "path/to/build-output_x86_64-linux/Megabyte"
+```
+
+Run each platform launcher with `--check-models` to load its policy and perform
+an inference check without connecting to RLBot or changing saved selections.
+Configure with `-DGGLBOT_BUILD_TESTS=ON` to build the `skill_profiles` and
+`package_paths` regression tests, plus `controller_linux` on Linux. CTest checks
+ranks, names, mixed rosters, persistence, the native selector, and Linux controller
+detachment and singleton behavior. On headless Linux, run
+`xvfb-run -a ctest --test-dir <build> --output-on-failure` (requires Xvfb and xauth). Python package tests run with
+`python -m unittest discover -s tests -v`; set `BYTE_PACKAGE_TEST_ROOT` to a
+scratch directory, and `BOB_EXE` / `PACKAGE_PROBE` to enable the real Bob splitter
+and compiled path checks.

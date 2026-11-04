@@ -1,0 +1,17 @@
+[settings]
+agent_id = "SubparNova/KilobyteReduced"
+hivemind = true
+name = "Kilobyte[Champ I]"
+loadout_file = "loadout.toml"
+root_dir = "."
+run_command = "GGLBot.exe"
+run_command_linux = "./GGLBot"
+logo_file = "logo.png"
+
+[details]
+description = "Kilobyte with adjustable rank strength."
+fun_fact = "Choose Auto to try to keep the score even or a rank in the skill selector; SSL runs full-strength Kilobyte."
+developer = "SubparNova"
+language = "C++"
+tags = ["1v1", "2v2", "3v3", "3v2", "2v1"]
+source_link = "https://github.com/SubparN0va/ByteBotpack"

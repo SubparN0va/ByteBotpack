@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import hashlib
-import json
 import re
 import posixpath
 from pathlib import Path
@@ -15,17 +13,17 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from build_bob import read_device
 
 
-MODEL_PATHS = tuple(f"rlbot/models/{model}/{name}.lt"
-                    for model in ("byte", "kilobyte", "megabyte")
+MODEL_PATHS = tuple(f"rlbot/{model}/{name}.lt"
+                    for model in ("kilobyte", "megabyte")
                     for name in ("POLICY", "SHARED_HEAD"))
 PACKAGE_PATHS = (
     ".dockerignore", ".gitattributes", ".gitignore", "README.md", "LICENSE",
     "bob.toml",
     "CMakeLists.txt", "cpp.Dockerfile",
     "build-support/libtorch/README.md", "cmake", "cpp-interface", "inc",
-    "gui", "launcher", "scripts", "src",
-    "rlbot/bot.toml", "rlbot/loadout.toml", "rlbot/logo.png", "rlbot/device.txt",
-    "rlbot/models/manifest.json", *MODEL_PATHS,
+    "gui", "launcher", "scripts", "src", "tests",
+    "rlbot/kilobyte/bot.toml", "rlbot/megabyte/bot.toml", "rlbot/loadout.toml", "rlbot/logo.png", "rlbot/device.txt",
+    *MODEL_PATHS,
 )
 EXCLUDED_DIRECTORIES = {
     ".git", ".vs", ".vscode", ".idea", ".venv", "venv", "__pycache__",
@@ -49,7 +47,7 @@ def submission_files(project: Path, output: Path) -> list[Path]:
         if not (project / name).is_file():
             raise ValueError("Missing submodule sources. Run git submodule update --init --recursive and retry.")
     read_device(project)
-    validate_models(project)
+    validate_models(project / "rlbot", source_layout=True)
 
     def check_local(path: Path):
         if path.is_symlink() or path.resolve() != path:
@@ -113,27 +111,24 @@ def check_include_case(project: Path, files: list[Path]):
                     break
 
 
-def validate_models(project: Path):
-    root = project / "rlbot"
-    manifest = json.loads((root / "models/manifest.json").read_text(encoding="utf-8"))
-    expected = {f"models/{model}/{name}.lt" for model in ("byte", "kilobyte", "megabyte")
+def validate_models(root: Path, profiles=("kilobyte", "megabyte"), *, source_layout=True):
+    expected = {(f"{model}/" if source_layout else "") + f"{name}.lt" for model in profiles
                 for name in ("POLICY", "SHARED_HEAD")}
-    entries = [entry for model in manifest["models"] for entry in model["files"]]
-    if len(entries) != 6 or {entry["path"] for entry in entries} != expected:
-        raise ValueError("The model manifest must contain exactly the Byte, Kilobyte and Megabyte pairs.")
-    for entry in entries:
-        path = root / entry["path"]
-        if not path.is_file(): raise ValueError(f"Missing model: {entry['path']}")
-        if path.stat().st_size != entry["bytes"] or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
-            raise ValueError(f"Model checksum mismatch: {entry['path']}")
+    for relative in sorted(expected):
+        path = root / relative
+        if not path.is_file():
+            raise ValueError(f"Missing model: {relative}")
+        if path.stat().st_size == 0:
+            raise ValueError(f"Empty model: {relative}")
 
 
 def submission_content(project: Path, path: Path) -> bytes:
     data = path.read_bytes()
-    if path.relative_to(project).as_posix() == "rlbot/bot.toml":
-        # New installations start at Megabyte, independent of the developer's last match.
-        data, count = re.subn(rb'(?m)^name = "[^"\r\n]*"', b'name = "Megabyte"', data)
-        if count != 1: raise ValueError("Expected one default bot name in rlbot/bot.toml")
+    if path.relative_to(project).as_posix() in ("rlbot/kilobyte/bot.toml", "rlbot/megabyte/bot.toml"):
+        # New installations keep the profile name until the first explicit rank selection.
+        default_name = b"Kilobyte[Champ I]" if path.parent.name == "kilobyte" else b"Megabyte"
+        data, count = re.subn(rb'(?m)^name = "[^"\r\n]*"', b'name = "' + default_name + b'"', data)
+        if count != 1: raise ValueError("Expected one default bot name in the profile bot.toml")
     return data
 
 

@@ -52,50 +52,46 @@ namespace
 int main(int argc, char** argv)
 {
     const auto exeDir = PackageDirectory(argc ? argv[0] : nullptr);
-    const auto baseAgentId=ReadAgentIdFromBotToml(exeDir/"bot.toml").value_or("SubparNova/MegabyteSkill");
-    if(argc>=2 && std::string_view(argv[1])=="--controller")
+    const auto profile = CompiledBotProfile();
+    const bool megabyte = profile == BotProfile::Megabyte;
+    const auto baseAgentId=ReadAgentIdFromBotToml(exeDir/"bot.toml").value_or(
+        megabyte ? "SubparNova/Megabyte" : "SubparNova/KilobyteReduced");
+    if(!megabyte && argc>=2 && std::string_view(argv[1])=="--controller")
         return RunSkillController(exeDir,baseAgentId,argc>=3 && std::string_view(argv[2])=="--debug");
     StartupOptions startup;
-    auto choice=ReadSavedChoice(exeDir);
+    auto choice=megabyte ? SkillChoice{SkillChoiceMode::Megabyte} : ReadSavedChoice(exeDir);
     try {
-        startup = ParseStartupOptions(argc, argv, std::getenv("GGLBOT_SKILL"), choice.Level());
+        startup = ParseStartupOptions(argc, argv, std::getenv("GGLBOT_SKILL"), choice.Level(), megabyte);
         if(startup.manualModel) choice={*startup.manualModel};
         else if(startup.explicitSkill) choice=SkillChoice::FromLevel(startup.skillLevel);
     }
     catch (const std::invalid_argument& error) {
-        std::cerr << error.what() << "\nUsage: GGLBot.exe [--manual=Off|Byte|Kilobyte|Megabyte] [--skill 0..23] [--no-ui] [--debug] [--ui-only] [--check-models]\n";
+        std::cerr << error.what() << "\nUsage: GGLBot.exe [--skill 0..22] [--no-ui] [--debug] [--ui-only] [--check-models]\n";
         return EXIT_FAILURE;
     }
     if (startup.showHelp) {
-        std::cout << "Usage: GGLBot.exe [--manual=Off|Byte|Kilobyte|Megabyte] [--skill 0..23] [--no-ui] [--debug] [--ui-only] [--check-models]\n"
-            "0 = Auto; 1..21 = Bronze I through Grand Champion III; 22 = SSL; 23 = SSL+ (Megabyte).\n"
-            "Default: GGLBOT_SKILL, then the last selected choice, then Megabyte.\n"
-            "--manual=Off keeps the GUI; Byte/Kilobyte/Megabyte runs that model at full strength without GUI/ranks.\n"
-            "Bare --manual defaults to Megabyte. Manual startup also synchronizes the configured name.\n"
-            "--check-models loads and checks every policy without connecting to RLBot.\n"
-            "One shared rank window opens on Windows. --ui-only sets the next-match default.\n";
+        std::cout << "Usage: GGLBot.exe [--skill 0..22] [--no-ui] [--debug] [--ui-only] [--check-models]\n"
+            "Kilobyte: 0 = Auto; 1..21 = Bronze I through Grand Champion III; 22 = full-strength SSL.\n"
+            "Megabyte packages always run at full strength without the GUI.\n"
+            "--check-models checks the package policy without connecting to RLBot.\n"
+            "One shared rank window opens for Kilobyte. --ui-only sets the next-match default.\n";
         return EXIT_SUCCESS;
     }
 
     auto ctx = std::make_shared<SharedBotContext>();
     ctx->control = std::make_shared<SkillControl>();
-    // A diagnostic must not change the next match's name or saved selection.
-    if (!startup.checkModels && !startup.manualModel)
-        ctx->control->saveSelection = [exeDir](SkillChoice selection) { return SaveSkillChoice(exeDir, selection); };
-    if(startup.manualModel) {
-        ctx->manualChoice=choice;
-        if(!startup.checkModels) {
-            const auto error=SyncManualModelName(exeDir,*startup.manualModel);
-            if(!error.empty()) std::cerr << "Manual model name was not updated: " << error << '\n';
-        }
-    }
+    ctx->startup = startup;
+    if(startup.manualModel) ctx->manualChoice=choice;
+    // Initial startup preserves Kilobyte[Champ I]; only an explicit selection saves a rank name.
     ctx->control->Select(choice);
+    if (!startup.checkModels && !megabyte)
+        ctx->control->saveSelection = [exeDir](SkillChoice selection) { return SaveSkillChoice(exeDir, selection); };
     ctx->control->debug.store(startup.debug);
     std::unique_ptr<SkillWindow> skillWindow;
     if (startup.uiOnly) skillWindow = std::make_unique<SkillWindow>(ctx->control, true);
     if (startup.uiOnly) { skillWindow->Wait(); return EXIT_SUCCESS; }
-    if(startup.manualModel) std::cout << "Manual model: " << SkillChoiceLabel(*startup.manualModel) << " (full strength, GUI disabled)\n";
-    else std::cout << "Byte default skill: " << startup.skillLevel << " - " << SkillLabel(startup.skillLevel) << "\n";
+    if(startup.manualModel) std::cout << "Package model: " << SkillChoiceLabel(*startup.manualModel) << " (full strength, GUI disabled)\n";
+    else std::cout << "Kilobyte default skill: " << startup.skillLevel << " - " << SkillLabel(startup.skillLevel) << "\n";
 
     // Live inference uses tiny batches. Avoid competing CPU thread pools when
     // several bot processes run together in a team match.
@@ -137,18 +133,20 @@ int main(int argc, char** argv)
             throw std::runtime_error("CUDA is unavailable; check the NVIDIA GPU, driver, and shared LibTorch runtime.");
 #endif
 
-    for (SkillModel model : {SkillModel::Megabyte, SkillModel::Byte95, SkillModel::Kilobyte}) {
-        const auto folder = exeDir / SkillModelFolder(model);
+    const auto modelRoot = LauncherDirectory(argc ? argv[0] : nullptr);
+    for (SkillModel model : {megabyte ? SkillModel::Megabyte : SkillModel::Kilobyte}) {
+        // Each package contains exactly one policy pair beside its launcher.
+        const auto& folder = modelRoot;
         std::cout << "Loading " << SkillModelName(model) << " from " << folder.string() << '\n';
         ctx->inferUnits[static_cast<size_t>(model)] = std::make_shared<GGL::InferUnit>(
             ctx->obs.get(), obsSize, ctx->act.get(), sharedHeadCfg, policyCfg, folder, useGPU);
     }
 
     } catch (const std::exception& error) {
-        std::cerr << "Byte: " << (useGPU ? "GPU" : "CPU") << " initialization failed: " << error.what() << '\n';
+        std::cerr << (megabyte ? "Megabyte: " : "Kilobyte: ") << (useGPU ? "GPU" : "CPU") << " initialization failed: " << error.what() << '\n';
         return EXIT_FAILURE;
     }
-    std::cout << "Byte: using " << (useGPU ? "GPU" : "CPU") << " for all three models\n" << std::flush;
+    std::cout << "Bot: using " << (useGPU ? "GPU" : "CPU") << " for " << (megabyte ? "Megabyte" : "Kilobyte") << "\n" << std::flush;
     if (startup.checkModels) return EXIT_SUCCESS;
 
     SetSpawnContext(ctx);
@@ -178,7 +176,14 @@ int main(int argc, char** argv)
     if (!manager.connect(serverHost, serverPort, agentIdStr.c_str(), false)) {
         return EXIT_FAILURE;
     }
-    if(startup.showUi) LaunchSkillController(ExecutableDirectory(argv[0])/"ByteSkillUI.exe",startup.debug);
+    if(startup.showUi) {
+#ifdef _WIN32
+        const auto controller = "ByteSkillUI.exe";
+#else
+        const auto controller = "ByteSkillUI";
+#endif
+        LaunchSkillController(ExecutableDirectory(argv[0])/controller,startup.debug);
+    }
 
     return 0;
 }

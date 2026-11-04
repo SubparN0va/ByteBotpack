@@ -157,7 +157,7 @@ void RLBotBot::initialize(const rlbot::flat::ControllableTeamInfo* teamInfo,
     for(const auto* car:*teamInfo->controllables()) {
         for(const auto* player:*match->player_configurations()) if(player->player_id()==car->identifier()) {
             if(const auto* bot=player->variety_as_CustomBot(); bot && bot->name())
-                configuredChoices[car->index()]=ChoiceForBot(bot->name()->str(),bot->run_command()?bot->run_command()->str():"",fallback);
+                configuredChoices[car->index()]=ChoiceForBot(bot->name()->str(),ctx_->startup,fallback);
         }
     }
 }
@@ -226,7 +226,7 @@ void RLBotBot::update(rlbot::flat::GamePacket const* packet,
         bool scripted, kickoffGuard, kickoffChanged, sampleDiagnostics;
     };
     std::vector<PendingDecision> pending;
-    std::array<std::vector<GGL::InferenceRequest>, 3> batches;
+    std::array<std::vector<GGL::InferenceRequest>, 2> batches;
     const std::set<unsigned> ordered(indices.begin(), indices.end());
     for (const auto index : ordered)
     {

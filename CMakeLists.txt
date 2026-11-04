@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.22)
 
 project(GGLBot)
 
+set(GGLBOT_PROFILE "kilobyte" CACHE STRING "Package profile: kilobyte or megabyte")
+set_property(CACHE GGLBOT_PROFILE PROPERTY STRINGS kilobyte megabyte)
+if(NOT GGLBOT_PROFILE MATCHES "^(kilobyte|megabyte)$")
+  message(FATAL_ERROR "GGLBOT_PROFILE must be kilobyte or megabyte")
+endif()
+
 set(DEVICE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/rlbot/device.txt")
 include(cmake/ReadDevice.cmake)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${DEVICE_FILE}")
@@ -75,15 +81,16 @@ file(GLOB_RECURSE GGLBOT_HEADERS CONFIGURE_DEPENDS
 )
 
 # The launcher locates the selected runtime before loading Torch.
-add_executable(GGLBot launcher/GGLBotLauncher.cpp)
+add_executable(GGLBot launcher/GGLBotLauncher.cpp src/Package.cpp)
 set_target_properties(GGLBot PROPERTIES OUTPUT_NAME GGLBot)
 target_compile_features(GGLBot PRIVATE cxx_std_20)
+target_include_directories(GGLBot PRIVATE src)
 target_compile_definitions(GGLBot PRIVATE GGLBOT_USE_CUDA=$<BOOL:${GGLBOT_USE_CUDA}>)
 if(WIN32)
   target_link_libraries(GGLBot PRIVATE shell32)
 endif()
 
-set(GGLBOT_DEPLOY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/rlbot" CACHE PATH "Bot package deployment directory")
+set(GGLBOT_DEPLOY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/rlbot/${GGLBOT_PROFILE}" CACHE PATH "Bot package deployment directory")
 set(GGLBOT_RUNTIME_DIR "${GGLBOT_DEPLOY_DIR}/000-runtime")
 
 function(configure_gglbot_target target runtime_root use_cuda)
@@ -153,27 +160,83 @@ add_custom_command(TARGET GGLBot POST_BUILD
 )
 
 
-# The controller has no Torch or GUI-framework dependency. It remains independent
+# The controller has no Torch dependency. It remains independent
 # of the inference process so Apply & respawn can keep the same window alive.
-if(WIN32)
-  add_executable(ByteSkillUI gui/SkillGuiMain.cpp src/Package.cpp src/SkillControl.cpp
-    src/SkillSession.cpp src/SkillSettings.cpp src/SkillPersistence.cpp)
-  target_compile_features(ByteSkillUI PRIVATE cxx_std_20)
-  target_include_directories(ByteSkillUI PRIVATE inc src)
-  target_link_libraries(ByteSkillUI PRIVATE RLBotCPP-static comctl32 shell32 user32 gdi32 uxtheme dwmapi)
-  add_dependencies(GGLBot ByteSkillUI)
-  add_custom_command(TARGET ByteSkillUI POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${GGLBOT_RUNTIME_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:ByteSkillUI>" "${GGLBOT_RUNTIME_DIR}/$<TARGET_FILE_NAME:ByteSkillUI>"
-    VERBATIM)
+function(configure_skill_gui target)
+  if(WIN32)
+    target_link_libraries(${target} PRIVATE comctl32 shell32 user32 gdi32 uxtheme dwmapi)
+  else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0>=3.22)
+    target_sources(${target} PRIVATE gui/SkillWindowGtk.cpp)
+    target_compile_definitions(${target} PRIVATE GGLBOT_LINUX_GUI=1)
+    target_link_libraries(${target} PRIVATE PkgConfig::GTK3)
+  endif()
+endfunction()
+add_executable(ByteSkillUI gui/SkillGuiMain.cpp src/Package.cpp src/SkillControl.cpp
+  src/SkillSession.cpp src/SkillSettings.cpp src/SkillPersistence.cpp)
+target_compile_features(ByteSkillUI PRIVATE cxx_std_20)
+target_include_directories(ByteSkillUI PRIVATE inc src)
+target_link_libraries(ByteSkillUI PRIVATE RLBotCPP-static)
+configure_skill_gui(ByteSkillUI)
+add_dependencies(GGLBot ByteSkillUI)
+add_custom_command(TARGET ByteSkillUI POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${GGLBOT_RUNTIME_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:ByteSkillUI>" "${GGLBOT_RUNTIME_DIR}/$<TARGET_FILE_NAME:ByteSkillUI>"
+  VERBATIM)
+if(NOT WIN32)
+  find_package(Threads REQUIRED)
+  target_link_libraries(ByteSkillUI PRIVATE Threads::Threads)
 endif()
 
-# The same manifest and directory layout are used locally and by bob.
+# The same model files and directory layout are used locally and by bob.
 add_custom_target(GGLBotPackage ALL
   COMMAND ${CMAKE_COMMAND}
     "-DSOURCE_PACKAGE=${CMAKE_CURRENT_SOURCE_DIR}/rlbot"
     "-DDEST_PACKAGE=${GGLBOT_DEPLOY_DIR}"
+    "-DBOT_PROFILE=${GGLBOT_PROFILE}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StagePackage.cmake"
   DEPENDS GGLBot
   VERBATIM)
 
+option(GGLBOT_BUILD_TESTS "Build profile and package regression tests" OFF)
+if(GGLBOT_BUILD_TESTS)
+  enable_testing()
+  foreach(profile kilobyte megabyte)
+    add_executable(compiled_profile_${profile} tests/compiled_profile.cpp src/Package.cpp)
+    target_compile_features(compiled_profile_${profile} PRIVATE cxx_std_20)
+    target_include_directories(compiled_profile_${profile} PRIVATE src)
+    target_compile_definitions(compiled_profile_${profile} PRIVATE
+      GGLBOT_PROFILE_MEGABYTE=$<STREQUAL:${profile},megabyte>)
+    add_test(NAME compiled_profile_${profile} COMMAND compiled_profile_${profile} ${profile})
+    set_tests_properties(compiled_profile_${profile} PROPERTIES TIMEOUT 30)
+  endforeach()
+  add_executable(package_paths tests/package_paths.cpp src/Package.cpp)
+  target_compile_features(package_paths PRIVATE cxx_std_20)
+  target_include_directories(package_paths PRIVATE src)
+  add_executable(skill_profiles tests/skill_profiles.cpp src/Package.cpp src/SkillControl.cpp
+    src/SkillSession.cpp src/SkillSettings.cpp src/SkillPersistence.cpp)
+  target_compile_features(skill_profiles PRIVATE cxx_std_20)
+  target_include_directories(skill_profiles PRIVATE inc src)
+  target_link_libraries(skill_profiles PRIVATE RLBotCPP-static)
+  configure_skill_gui(skill_profiles)
+  add_test(NAME skill_profiles COMMAND skill_profiles "${CMAKE_BINARY_DIR}/test-output")
+  set_tests_properties(skill_profiles PROPERTIES TIMEOUT 60)
+  if(NOT WIN32)
+    add_executable(controller_linux tests/controller_linux.cpp src/SkillControl.cpp
+      src/SkillSession.cpp src/SkillSettings.cpp src/SkillPersistence.cpp)
+    target_compile_features(controller_linux PRIVATE cxx_std_20)
+    target_include_directories(controller_linux PRIVATE inc src)
+    target_link_libraries(controller_linux PRIVATE RLBotCPP-static Threads::Threads)
+    add_test(NAME controller_linux COMMAND controller_linux "${CMAKE_BINARY_DIR}/controller-output")
+    set_tests_properties(controller_linux PROPERTIES TIMEOUT 30)
+  endif()
+endif()
+
+# Every executable containing Package.cpp uses the same build-time identity.
+foreach(target GGLBot ${GGLBOT_CORE} ByteSkillUI package_paths skill_profiles)
+  if(TARGET ${target})
+    target_compile_definitions(${target} PRIVATE
+      GGLBOT_PROFILE_MEGABYTE=$<STREQUAL:${GGLBOT_PROFILE},megabyte>)
+  endif()
+endforeach()

@@ -6,6 +6,7 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+#include "Package.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -326,19 +327,30 @@ int main(int argc, char** argv)
     }
 
     const auto launcherDirectory = launcherPath->parent_path();
-#ifdef _WIN32
+    const auto profile = CompiledBotProfile();
     bool guiOnly = false;
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]) == "--ui-only" || std::string(argv[i]) == "--controller") guiOnly = true;
     if (guiOnly) {
+        if (profile == BotProfile::Megabyte) {
+            std::cerr << "Megabyte has no skill selector; use Kilobyte[Champ I].\n";
+            return EXIT_FAILURE;
+        }
+#ifdef _WIN32
         const auto gui = launcherDirectory / "000-runtime" / "ByteSkillUI.exe";
+#else
+        const auto gui = launcherDirectory / "000-runtime" / "ByteSkillUI";
+#endif
         if (!std::filesystem::is_regular_file(gui)) {
             std::cerr << "Byte launcher: GUI executable not found at " << gui << '\n';
             return EXIT_FAILURE;
         }
+#ifdef _WIN32
         return LaunchCore(*launcherPath, gui);
-    }
+#else
+        return LaunchCore(gui, argc, argv);
 #endif
+    }
     constexpr bool useCUDA = GGLBOT_USE_CUDA != 0;
     constexpr const char* device = useCUDA ? "GPU" : "CPU";
     constexpr const char* overrideName = useCUDA ? "LIBTORCH_CUDA_ROOT" : "LIBTORCH_CPU_ROOT";

@@ -8,15 +8,73 @@
 #include <sstream>
 #include <thread>
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <stdexcept>
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/file.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
 #endif
 
 namespace {
     const char* Host() { const auto value=std::getenv("RLBOT_SERVER_IP"); return value?value:"127.0.0.1"; }
     const char* Port() { const auto value=std::getenv("RLBOT_SERVER_PORT"); return value?value:"23234"; }
+    // One observer per package/server. Never unlink a flock file: replacing its
+    // inode would allow a second controller to take a different lock concurrently.
+    class ControllerInstance {
+#ifdef _WIN32
+        HANDLE handle = nullptr;
+#else
+        int handle = -1;
+#endif
+    public:
+        bool acquired = false;
+        explicit ControllerInstance(const std::filesystem::path& package) {
+            const auto path = std::filesystem::weakly_canonical(package);
+#ifdef _WIN32
+            const auto key = path.wstring() + L"|" + std::filesystem::path(Host()).wstring() + L"|" + std::filesystem::path(Port()).wstring();
+#else
+            const auto key = path.string() + "|" + Host() + "|" + Port();
+#endif
+            uint64_t hash = 14695981039346656037ull;
+            for (auto ch : key) {
+#ifdef _WIN32
+                ch = std::towlower(ch);
+#endif
+                hash ^= uint64_t(ch); hash *= 1099511628211ull;
+            }
+#ifdef _WIN32
+            const auto name = L"Local\\ByteSkillController-" + std::to_wstring(hash);
+            handle = CreateMutexW(nullptr, TRUE, name.c_str());
+            if (!handle) throw std::runtime_error("Cannot lock the skill controller");
+            acquired = GetLastError() != ERROR_ALREADY_EXISTS;
+#else
+            const auto name = path / ("skill-controller-" + std::to_string(hash) + ".lock");
+            handle = open(name.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+            if (handle < 0) throw std::runtime_error("Cannot open skill controller lock: " + std::string(std::strerror(errno)));
+            acquired = flock(handle, LOCK_EX | LOCK_NB) == 0;
+            if (!acquired && errno != EWOULDBLOCK) {
+                const auto error = errno; close(handle); handle = -1;
+                throw std::runtime_error("Cannot lock skill controller: " + std::string(std::strerror(error)));
+            }
+#endif
+        }
+        ~ControllerInstance() {
+#ifdef _WIN32
+            if (handle) { if (acquired) ReleaseMutex(handle); CloseHandle(handle); }
+#else
+            if (handle >= 0) close(handle);
+#endif
+        }
+    };
     bool OwnBot(const rlbot::flat::CustomBotT& bot,const std::filesystem::path& package,const std::string& agentId) {
         std::error_code error;
         return !IsManualRunCommand(bot.run_command) && (bot.agent_id==agentId || bot.agent_id.starts_with(agentId+"/rank/")) &&
@@ -40,20 +98,21 @@ public:
 
 rlbot::flat::MatchConfigurationT RankRespawnConfiguration(const rlbot::flat::MatchConfigurationT& current,
     const std::map<unsigned,SkillRow>& rows,const std::string& agentId,const std::string& generation) {
-    if(rows.empty() || generation.empty()) throw std::invalid_argument("No Byte bots to respawn");
+    if(rows.empty() || generation.empty()) throw std::invalid_argument("No Kilobyte bots to respawn");
     auto result=current;
     result.existing_match_behavior=rlbot::flat::ExistingMatchBehavior::ContinueAndSpawn;
     for(const auto& [slot,row]:rows) {
         if(slot>=result.player_configurations.size()) throw std::invalid_argument("Match roster changed");
+        if(row.pending.mode != SkillChoiceMode::SelectSkill) throw std::invalid_argument("Only Kilobyte ranks can respawn");
         auto& player=*result.player_configurations[slot];
         auto* bot=player.variety.AsCustomBot();
         if(!bot || IsManualRunCommand(bot->run_command) || player.player_id!=row.playerId || player.team!=row.team ||
             !(bot->agent_id==agentId || bot->agent_id.starts_with(agentId+"/rank/")))
-            throw std::invalid_argument("Byte roster changed; review the new match first");
+            throw std::invalid_argument("Kilobyte roster changed; review the new match first");
         bot->name=ChoiceBotName(row.pending);
         // Core only despawns a car when its type, team or agent ID changes.
-        // A new generation forces the rename. Mode-specific run commands and
-        // IDs preserve the selected policy independently of display names.
+        // A new generation forces the rename. Rank-specific IDs separate hive
+        // launches while the package profile keeps the policy fixed.
         // https://github.com/RLBot/core/blob/master/RLBotCS/ManagerTools/MatchStarter.cs
         bot->agent_id=agentId+"/rank/"+generation+"/"+std::to_string(row.pending.Level())+"/"+std::to_string(int(row.pending.mode));
         bot->run_command=RunCommandWithChoice(bot->run_command,row.pending);
@@ -62,8 +121,9 @@ rlbot::flat::MatchConfigurationT RankRespawnConfiguration(const rlbot::flat::Mat
     return result;
 }
 
-SkillSession::SkillSession(std::shared_ptr<SkillControl> shared,std::filesystem::path directory,std::string id)
-    :control(std::move(shared)),package(std::move(directory)),agentId(std::move(id)) {}
+SkillSession::SkillSession(std::shared_ptr<SkillControl> shared,std::filesystem::path directory,std::string id,const char* rankOverride)
+    :control(std::move(shared)),package(std::move(directory)),agentId(std::move(id)),
+     environmentSkill(rankOverride ? std::optional<std::string>(rankOverride) : std::nullopt) {}
 SkillSession::~SkillSession() {probe.reset();terminate();join();}
 
 void SkillSession::handleMatchConfiguration(const rlbot::flat::MatchConfiguration* packet) noexcept {
@@ -82,13 +142,14 @@ void SkillSession::handleMatchConfiguration(const rlbot::flat::MatchConfiguratio
             const auto& player=next->player_configurations[slot];
             const auto* bot=player->variety.AsCustomBot();
             if(!bot || !OwnBot(*bot,package,agentId)) continue;
-            const auto choice=ChoiceForBot(bot->name,bot->run_command,control->selectedChoice);
+            const auto startup = ParseRunCommandOptions(bot->run_command,
+                environmentSkill ? environmentSkill->c_str() : nullptr, control->selectedChoice.Level());
+            const auto choice=ChoiceForBot(bot->name,startup,control->selectedChoice);
             const auto level=choice.Level();
             SkillRow row{player->player_id,player->team,bot->name,level,choice,choice.mode};
             const auto old=control->rows.find(slot);
             const auto expected=expectedAgents.find(slot);
-            // Keep the two-selector choice through our own respawn, including
-            // Select Skill at an endpoint and the inactive custom-rank value.
+            // Keep the pending rank through our own respawn and roster refresh.
             if(old!=control->rows.end() && (old->second.playerId==row.playerId ||
                 (control->applying && expected!=expectedAgents.end() && bot->agent_id==expected->second)))
                 row.pending=old->second.pending;
@@ -125,7 +186,8 @@ void SkillSession::handleGamePacket(const rlbot::flat::GamePacket* packet) noexc
         bool found=false;
         for(const auto* player:*packet->players()) if(player->player_id()==row.playerId && player->name()) {
             row.name=player->name()->str();
-            row.active=SkillFromBotName(row.name).value_or(row.active);
+            // Names can still reflect the packaged default when --skill or the
+            // environment overrides it. The match configuration resolved active.
             found=BotNameMatches(row.name,ChoiceBotName(row.pending));break;
         }
         const auto expected=expectedAgents.find(slot);
@@ -133,7 +195,7 @@ void SkillSession::handleGamePacket(const rlbot::flat::GamePacket* packet) noexc
         confirmed=confirmed && found && expected!=expectedAgents.end() && bot && bot->agent_id==expected->second;
     }
     if(confirmed) {
-        control->applying=false;expectedAgents.clear();control->status="Ranks applied; Byte cars respawned";
+        control->applying=false;expectedAgents.clear();control->status="Ranks applied; Kilobyte cars respawned";
     }
 }
 
@@ -151,7 +213,7 @@ void SkillSession::Apply() {
         for(const auto& [slot,row]:control->rows) expectedAgents[slot]=next.player_configurations[slot]->variety.AsCustomBot()->agent_id;
         control->applying=true;requestedAt=std::chrono::steady_clock::now();
         needConfiguration=true;
-        control->status="Respawning Byte cars... waiting for game confirmation";
+        control->status="Respawning Kilobyte cars... waiting for game confirmation";
         sendMatchConfiguration(std::move(next));
         // Remember a useful default for a fresh match. Per-car settings live in
         // the match configuration itself and are restored by each spawned bot.
@@ -203,8 +265,8 @@ bool DecodeSkillTelemetry(const std::string& message,int& playerId,SkillTelemetr
         >>t.settings.sampling.temperature>>t.settings.sampling.topK>>t.settings.sampling.minRelativeProbability
         >>t.settings.sampling.bestActionProbability>>t.sampling.finalBestProbability>>t.sampling.policyBestProbability
         >>t.sampling.normalizedEntropy>>t.sampling.retainedActions>>t.teammates>>t.opponents>>t.teamScore>>t.opponentScore)) return false;
-    if(magic!="BYTE_SKILL_1" || model<0 || model>2 || !std::isfinite(t.effectiveLevel) ||
-        t.effectiveLevel<1 || t.effectiveLevel>23) return false;
+    if(magic!="BYTE_SKILL_1" || model<0 || model>1 || !std::isfinite(t.effectiveLevel) ||
+        t.effectiveLevel<1 || t.effectiveLevel>MaxSelectableRank) return false;
     // The optional trailing flag keeps telemetry from older bot processes readable.
     t.scriptedKickoff=false;
     s>>std::ws;
@@ -236,38 +298,62 @@ void LaunchSkillController(const std::filesystem::path& executable,bool debug) {
         (job.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_BREAKAWAY_OK)) flags|=CREATE_BREAKAWAY_FROM_JOB;
     if(CreateProcessW(executable.c_str(),command.data(),nullptr,nullptr,FALSE,flags,
         nullptr,executable.parent_path().c_str(),&startup,&process)) {CloseHandle(process.hThread);CloseHandle(process.hProcess);}
-    else std::cerr<<"Could not open Byte controls (Windows error "<<GetLastError()<<").\n";
+    else std::cerr<<"Could not open Kilobyte controls (Windows error "<<GetLastError()<<").\n";
+#else
+    // Spawn without a shell and in its own session so an inference respawn does
+    // not kill the controller. Do not retain RLBot sockets or captured stdio
+    // pipes, which could otherwise keep a retired inference launch alive.
+    // https://man7.org/linux/man-pages/man3/posix_spawn.3.html
+    auto path = executable.string();
+    char controller[] = "--controller", diagnostic[] = "--debug";
+    char* arguments[] = {path.data(), controller, debug ? diagnostic : nullptr, nullptr};
+    posix_spawnattr_t attributes;
+    posix_spawn_file_actions_t actions;
+    int error = posix_spawnattr_init(&attributes);
+    if (error) { std::cerr << "Cannot initialize controller launch: " << std::strerror(error) << '\n'; return; }
+    error = posix_spawn_file_actions_init(&actions);
+    if (error) { posix_spawnattr_destroy(&attributes); std::cerr << "Cannot initialize controller launch: " << std::strerror(error) << '\n'; return; }
+    error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSID);
+    if (!error) error = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!error) error = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    if (!error) error = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    if (!error) error = posix_spawn_file_actions_addclosefrom_np(&actions, 3);
+    pid_t child = -1;
+    if (!error) error = posix_spawn(&child, path.c_str(), &actions, &attributes, arguments, environ);
+    posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes);
+    if (error) { std::cerr << "Could not open Kilobyte controls: " << std::strerror(error) << '\n'; return; }
+    std::thread([child] {
+        int status = 0;
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+            std::cerr << "Kilobyte controls exited with status " << WEXITSTATUS(status) << ". Check the desktop session and GTK 3 runtime.\n";
+    }).detach();
 #endif
 }
 
 int RunSkillController(const std::filesystem::path& package,const std::string& agentId,bool debug) {
-#ifdef _WIN32
-    const auto key=std::filesystem::weakly_canonical(package).wstring()+L"|"+
-        std::filesystem::path(Host()).wstring()+L"|"+std::filesystem::path(Port()).wstring();
-    uint64_t hash=14695981039346656037ull;
-    for(auto ch:key) {hash^=uint64_t(std::towlower(ch));hash*=1099511628211ull;}
-    const auto name=L"Local\\ByteSkillController-"+std::to_wstring(hash);
-    HANDLE singleton=CreateMutexW(nullptr,TRUE,name.c_str());
-    if(!singleton) return 1;
-    if(GetLastError()==ERROR_ALREADY_EXISTS) {CloseHandle(singleton);return 0;}
+    ControllerInstance singleton(package);
+    if (!singleton.acquired) return 0;
     auto control=std::make_shared<SkillControl>();control->debug=debug;
     control->selectedChoice=ReadSavedChoice(package);
     control->selectedLevel=control->selectedChoice.Level();
-    SkillSession session(control,package,agentId);
-    if(!session.connect(Host(),Port())) {ReleaseMutex(singleton);CloseHandle(singleton);return 1;}
+    SkillSession session(control,package,agentId,std::getenv("GGLBOT_SKILL"));
+    if(!session.connect(Host(),Port())) return 1;
     session.sendConnectionSettings({.agent_id="",.wants_ball_predictions=false,.wants_comms=true,.close_between_matches=false});
     session.sendInitComplete({});
     control->applyPending=[&session] {session.Apply();};
     // Client::connected() stays true until join() completes in this interface.
     // Wait on the service thread separately so socket loss closes the observer.
     auto stopped=std::async(std::launch::async,[&session] {session.join();});
-    {
+    try {
         SkillWindow window(control);
-        while(stopped.wait_for(std::chrono::milliseconds(250))!=std::future_status::ready) session.Tick();
+        while(stopped.wait_for(std::chrono::milliseconds(20))!=std::future_status::ready) {
+            session.Tick();
+            if (!window.Pump()) { session.terminate(); break; }
+        }
+    } catch (...) {
+        session.terminate(); stopped.get(); control->applyPending = {}; throw;
     }
     stopped.get();control->applyPending={};
-    ReleaseMutex(singleton);CloseHandle(singleton);return 0;
-#else
-    std::cerr<<"The shared skill window requires Windows.\n";return 1;
-#endif
+    return 0;
 }

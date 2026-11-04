@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 
 void SkillControl::Publish(unsigned player, SkillTelemetry value) {
@@ -44,7 +45,7 @@ struct SkillWindow::Impl {
     static constexpr COLORREF Teal=RGB(43,116,122), Cyan=RGB(98,198,204), Gold=RGB(231,217,166);
     static constexpr UINT StopMessage=WM_APP+2, TrayMessage=WM_APP+1;
     static constexpr int RowHeight=54;
-    struct RowControls { HWND caption{},model{},combo{},minus{},plus{}; unsigned slot=0; };
+    struct RowControls { HWND caption{},combo{},minus{},plus{}; unsigned slot=0; };
     std::shared_ptr<SkillControl> control;
     bool standalone=false,expanded=false;
     std::thread thread;
@@ -92,8 +93,8 @@ struct SkillWindow::Impl {
             SendMessageW(heading,WM_SETFONT,reinterpret_cast<WPARAM>(fonts[2]),TRUE);
             SendMessageW(details,WM_SETFONT,reinterpret_cast<WPARAM>(fonts[3]),TRUE);
             for(auto& r:rowControls) {
-                for(auto h:{r.caption,r.model,r.combo,r.minus,r.plus}) SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(fonts[0]),TRUE);
-                for(auto h:{r.model,r.combo}) {
+                for(auto h:{r.caption,r.combo,r.minus,r.plus}) SendMessageW(h,WM_SETFONT,reinterpret_cast<WPARAM>(fonts[0]),TRUE);
+                for(auto h:{r.combo}) {
                     SendMessageW(h,CB_SETITEMHEIGHT,-1,Px(22));SendMessageW(h,CB_SETITEMHEIGHT,0,Px(28));
                 }
                 SendMessageW(r.combo,CB_SETDROPPEDWIDTH,Px(300),0);
@@ -113,14 +114,12 @@ struct SkillWindow::Impl {
         while(int(rowControls.size())<count) {
             const int i=int(rowControls.size());
             rowControls.emplace_back();auto& r=rowControls.back();r.caption=Label(L"",20+i,0);
-            r.model=Child(L"COMBOBOX",L"Model",CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS|WS_VSCROLL|WS_TABSTOP,100+i*4);
             r.combo=Child(L"COMBOBOX",L"Rank",CBS_DROPDOWNLIST|CBS_OWNERDRAWFIXED|CBS_HASSTRINGS|WS_VSCROLL|WS_TABSTOP,101+i*4);
-            for(auto h:{r.model,r.combo}) {
+            for(auto h:{r.combo}) {
                 SetWindowTheme(h,L"",L"");SetWindowSubclass(h,ComboProcedure,1,reinterpret_cast<DWORD_PTR>(this));
                 SendMessageW(h,CB_SETITEMHEIGHT,-1,Px(22));SendMessageW(h,CB_SETITEMHEIGHT,0,Px(28));
             }
             SendMessageW(r.combo,CB_SETDROPPEDWIDTH,Px(300),0);
-            for(int mode=0;mode<4;++mode) {auto label=Wide(SkillChoiceLabel(static_cast<SkillChoiceMode>(mode)));SendMessageW(r.model,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));}
             for(int level=0;level<=MaxSelectableRank;++level) {auto label=Wide(std::to_string(level)+" / "+SkillLabel(level));SendMessageW(r.combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label.c_str()));}
             r.minus=Button(L"-",102+i*4);r.plus=Button(L"+",103+i*4);
         }
@@ -134,9 +133,9 @@ struct SkillWindow::Impl {
         for(int i=0;i<int(rowControls.size());++i) {
             auto& r=rowControls[i];int y=70+i*RowHeight;
             Place(r.caption,24,y,w-48,18);
-            Place(r.model,24,y+20,160,180);Place(r.combo,196,y+20,w-332,300);
+            Place(r.combo,24,y+20,w-160,300);
             Place(r.minus,w-124,y+20,44,28);Place(r.plus,w-68,y+20,44,28);
-            for(auto child:{r.caption,r.model,r.combo,r.minus,r.plus}) ShowWindow(child,i<visibleRows?SW_SHOWNA:SW_HIDE);
+            for(auto child:{r.caption,r.combo,r.minus,r.plus}) ShowWindow(child,i<visibleRows?SW_SHOWNA:SW_HIDE);
         }
         Place(apply,24,bottom+8,210,32);Place(debug,w-156,bottom+8,132,32);
         Place(footer,24,bottom+48,w-48,40);
@@ -171,14 +170,9 @@ struct SkillWindow::Impl {
             const auto found=control->rows.find(slot);
             if(found==control->rows.end() || control->applying) return;
             auto& r=found->second;
-            if(action==0) {
-                const int selected=int(SendMessageW(rowControls[row].model,CB_GETCURSEL,0,0));
-                if(selected>=0 && selected<=3) r.pending.mode=static_cast<SkillChoiceMode>(selected);
-            } else if(r.pending.mode==SkillChoiceMode::SelectSkill) {
-                const int rank=action==1?int(SendMessageW(rowControls[row].combo,CB_GETCURSEL,0,0)):
-                    r.pending.rank+(action==2?-1:1);
-                r.pending.rank=std::clamp(rank,0,MaxSelectableRank);
-            }
+            const int rank=action==1?int(SendMessageW(rowControls[row].combo,CB_GETCURSEL,0,0)):
+                r.pending.rank+(action==2?-1:1);
+            r.pending=SkillChoice::FromLevel(std::clamp(rank,0,MaxSelectableRank));
         }
         Refresh();
     }
@@ -211,24 +205,19 @@ struct SkillWindow::Impl {
             auto& widgets=rowControls[i];const auto& r=rows.at(slot);widgets.slot=slot;
             const std::string caption=standalone?"Next match":(r.team?"Orange":"Blue")+std::string(" / ")+r.name;
             SetText(widgets.caption,Wide(caption));
-            const bool custom=r.pending.mode==SkillChoiceMode::SelectSkill;
-            const int displayedRank=custom?r.pending.rank:-1;
+            const int displayedRank=r.pending.rank;
             // An open combo reports its transient hover highlight as the current
             // selection. Resetting it from pending every timer tick fights the
             // mouse and scroll position; synchronize only after the list closes.
-            if(!SendMessageW(widgets.model,CB_GETDROPPEDSTATE,0,0) &&
-                SendMessageW(widgets.model,CB_GETCURSEL,0,0)!=int(r.pending.mode)) {
-                SendMessageW(widgets.model,CB_SETCURSEL,int(r.pending.mode),0);InvalidateRect(widgets.model,nullptr,TRUE);
-            }
             if(!SendMessageW(widgets.combo,CB_GETDROPPEDSTATE,0,0) &&
                 SendMessageW(widgets.combo,CB_GETCURSEL,0,0)!=displayedRank) {
                 SendMessageW(widgets.combo,CB_SETCURSEL,displayedRank,0);InvalidateRect(widgets.combo,nullptr,TRUE);
             }
-            EnableWindow(widgets.model,!busy);EnableWindow(widgets.combo,!busy && custom);
-            EnableWindow(widgets.minus,!busy && custom && r.pending.rank>0);
-            EnableWindow(widgets.plus,!busy && custom && r.pending.rank<MaxSelectableRank);
+            EnableWindow(widgets.combo,!busy);
+            EnableWindow(widgets.minus,!busy && r.pending.rank>0);
+            EnableWindow(widgets.plus,!busy && r.pending.rank<MaxSelectableRank);
         }
-        SetText(subtitle,Wide(count?dirty?std::to_string(dirty)+(dirty==1?" pending change":" pending changes"):"Choose a model or skill for each bot":"Waiting for Byte bots..."));
+        SetText(subtitle,Wide(count?dirty?std::to_string(dirty)+(dirty==1?" pending change":" pending changes"):"Choose a rank for each Kilobyte bot":"Waiting for Kilobyte bots..."));
         EnableWindow(apply,!busy && (standalone || ready));
         SetText(apply,busy?L"Respawning...":standalone?L"Save default":L"Apply & respawn");
         std::string note=status;
@@ -356,16 +345,16 @@ struct SkillWindow::Impl {
             // Keep automatic startup out of Windows' activation fallback, while
             // retaining taskbar/Alt+Tab access for deliberate user selection.
             const DWORD extended=standalone?0:WS_EX_NOACTIVATE|WS_EX_APPWINDOW;
-            auto hwnd=CreateWindowExW(extended,cls.lpszClassName,L"Byte Model Selection",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,620,320,nullptr,nullptr,cls.hInstance,this);
+            auto hwnd=CreateWindowExW(extended,cls.lpszClassName,L"Kilobyte Skill Selection",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,620,320,nullptr,nullptr,cls.hInstance,this);
             if(hwnd) {
                 dpi=GetDpiForWindow(hwnd);RebuildFonts();BOOL dark=TRUE;DwmSetWindowAttribute(hwnd,DWMWA_USE_IMMERSIVE_DARK_MODE,&dark,sizeof(dark));
                 COLORREF caption=Well;DwmSetWindowAttribute(hwnd,DWMWA_CAPTION_COLOR,&caption,sizeof(caption));
-                heading=Label(L"Byte Model Selection",10,2);subtitle=Label(L"",11);
+                heading=Label(L"Kilobyte Skill Selection",10,2);subtitle=Label(L"",11);
                 apply=Button(L"Apply & respawn",1);expanded=control->debug.load();debug=Button(expanded?L"Hide debug":L"Show debug",2);
                 footer=Label(L"",13);details=Child(L"EDIT",L"Debug details",ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL|WS_TABSTOP,14,3);SetWindowTheme(details,L"DarkMode_Explorer",nullptr);
                 Refresh();SizeToContent();
                 tray.cbSize=sizeof(tray);tray.hWnd=hwnd;tray.uID=1;tray.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;
-                tray.uCallbackMessage=TrayMessage;tray.hIcon=LoadIcon(nullptr,IDI_APPLICATION);wcscpy_s(tray.szTip,L"Byte Model Selection - double-click to reopen");Shell_NotifyIconW(NIM_ADD,&tray);
+                tray.uCallbackMessage=TrayMessage;tray.hIcon=LoadIcon(nullptr,IDI_APPLICATION);wcscpy_s(tray.szTip,L"Kilobyte Skill Selection - double-click to reopen");Shell_NotifyIconW(NIM_ADD,&tray);
                 SetTimer(hwnd,1,500,nullptr);
                 if(standalone) ShowWindow(hwnd,SW_SHOW);
                 // SW_SHOWNOACTIVATE can still raise the window over the game.
@@ -379,14 +368,19 @@ struct SkillWindow::Impl {
     }
     ~Impl() {if(thread.joinable()) {PostMessageW(window,StopMessage,0,0);thread.join();}}
 };
-#else
-struct SkillWindow::Impl {Impl(std::shared_ptr<SkillControl>,bool) {std::cerr<<"The live panel is available on Windows. Use --no-ui for headless startup.\n";}};
+#elif !defined(GGLBOT_LINUX_GUI)
+// The inference core has no GTK dependency; the launcher routes GUI requests
+// to the separate controller executable on Linux.
+struct SkillWindow::Impl {Impl(std::shared_ptr<SkillControl>,bool) {throw std::runtime_error("Use the GGLBot launcher to open the skill selector");}};
 #endif
 
+#if !defined(GGLBOT_LINUX_GUI)
 SkillWindow::SkillWindow(std::shared_ptr<SkillControl> control,bool standalone):impl(std::make_unique<Impl>(std::move(control),standalone)) {}
 SkillWindow::~SkillWindow() = default;
+bool SkillWindow::Pump() {return true;}
 void SkillWindow::Wait() {
 #ifdef _WIN32
     if(impl->thread.joinable())impl->thread.join();
 #endif
 }
+#endif

@@ -7,13 +7,14 @@
 #include <optional>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 namespace {
     int ParseSkill(std::string_view text) {
         int level = -1;
         const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), level);
         if (text.empty() || error != std::errc{} || end != text.data() + text.size() || level < 0 || level > MaxSkillLevel)
-            throw std::invalid_argument("Skill must be an integer from 0 (Auto) to 23 (SSL+).");
+            throw std::invalid_argument("Skill must be an integer from 0 (Auto) to 22 (SSL).");
         return level;
     }
 }
@@ -21,9 +22,7 @@ namespace {
 int SkillChoice::Level() const {
     if(rank<0 || rank>MaxSelectableRank) throw std::invalid_argument("Invalid selected rank");
     switch(mode) {
-    case SkillChoiceMode::Byte: return 21;
-    case SkillChoiceMode::Kilobyte: return 22;
-    case SkillChoiceMode::Megabyte: return 23;
+    case SkillChoiceMode::Megabyte: return MaxSelectableRank;
     case SkillChoiceMode::SelectSkill: return rank;
     }
     throw std::invalid_argument("Invalid model choice");
@@ -31,14 +30,11 @@ int SkillChoice::Level() const {
 
 SkillChoice SkillChoice::FromLevel(int level) {
     if(level<0 || level>MaxSkillLevel) throw std::invalid_argument("Invalid skill level");
-    if(level>=21) return {static_cast<SkillChoiceMode>(level-21),14};
     return {SkillChoiceMode::SelectSkill,level};
 }
 
 const char* SkillChoiceLabel(SkillChoiceMode mode) {
     switch(mode) {
-    case SkillChoiceMode::Byte: return "Byte";
-    case SkillChoiceMode::Kilobyte: return "Kilobyte";
     case SkillChoiceMode::Megabyte: return "Megabyte";
     case SkillChoiceMode::SelectSkill: return "Select Skill";
     }
@@ -49,7 +45,6 @@ std::string SkillLabel(int level) {
     if (level == 0) return "Auto - try to keep the score even";
     if (level < 0 || level > MaxSkillLevel) throw std::invalid_argument("Invalid skill level");
     if (level == 22) return "Supersonic Legend";
-    if (level == MaxSkillLevel) return "SSL+ (Megabyte)";
     static constexpr const char* ranks[] = {"Bronze", "Silver", "Gold", "Platinum", "Diamond", "Champion", "Grand Champion"};
     static constexpr const char* roman[] = {"I", "II", "III"};
     return std::string(ranks[(level - 1) / 3]) + " " + roman[(level - 1) % 3];
@@ -58,29 +53,18 @@ std::string SkillLabel(int level) {
 const char* SkillModelName(SkillModel model) {
     switch (model) {
     case SkillModel::Megabyte: return "Megabyte";
-    case SkillModel::Byte95: return "Byte (95B)";
     case SkillModel::Kilobyte: return "Kilobyte";
-    }
-    throw std::invalid_argument("Invalid skill model");
-}
-
-const char* SkillModelFolder(SkillModel model) {
-    switch (model) {
-    case SkillModel::Megabyte: return "models/megabyte";
-    case SkillModel::Byte95: return "models/byte";
-    case SkillModel::Kilobyte: return "models/kilobyte";
     }
     throw std::invalid_argument("Invalid skill model");
 }
 
 SkillSettings SettingsForSkill(float level, int teamSize) {
     if (!std::isfinite(level) || level < 1.f || level > MaxSkillLevel || teamSize < 1 || teamSize > 3)
-        throw std::invalid_argument("Effective skill must be in [1, 23] and team size in [1, 3]");
+        throw std::invalid_argument("Effective skill must be in [1, 22] and team size in [1, 3]");
     SkillSettings settings;
     if (level >= 22.f) {
-        // SSL is full Kilobyte. Level 23 remains a legacy CLI/benchmark endpoint
-        // for Megabyte, but cannot be selected as a custom rank or reached by Auto.
-        settings.model = level < 23.f ? SkillModel::Kilobyte : SkillModel::Megabyte;
+        // Every rank, including SSL, uses the Kilobyte policy.
+        settings.model = SkillModel::Kilobyte;
         settings.deterministic = true;
         settings.sampling.temperature = 1.f;
         settings.sampling.topK = 1;
@@ -189,8 +173,7 @@ SkillSettings SettingsForChoice(SkillChoice choice,float effectiveLevel,int team
         return SettingsForSkill(effectiveLevel,teamSize);
     }
     auto settings=SettingsForSkill(22,teamSize);
-    settings.model=choice.mode==SkillChoiceMode::Byte?SkillModel::Byte95:
-        choice.mode==SkillChoiceMode::Kilobyte?SkillModel::Kilobyte:SkillModel::Megabyte;
+    settings.model=SkillModel::Megabyte;
     return settings;
 }
 
@@ -206,28 +189,13 @@ SkillSettings GuardKickoff(SkillSettings settings, float effectiveLevel) {
     return settings;
 }
 
-StartupOptions ParseStartupOptions(int argc, const char* const* argv, const char* environmentSkill, int savedSkill) {
+StartupOptions ParseStartupOptions(int argc, const char* const* argv, const char* environmentSkill, int savedSkill, bool fullStrengthMegabyte) {
     StartupOptions options;
     std::optional<std::string_view> requestedSkill;
-    bool manualSpecified=false;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--help" || arg == "-h") options.showHelp = true;
         else if (arg == "--no-ui") options.showUi = false;
-        else if (arg == "--manual" || arg.starts_with("--manual=")) {
-            if(manualSpecified) throw std::invalid_argument("Specify --manual only once.");
-            manualSpecified=true;
-            std::string model="Megabyte";
-            if(arg.starts_with("--manual=")) model=arg.substr(9);
-            else if(i+1<argc && !std::string_view(argv[i+1]).starts_with("--")) model=argv[++i];
-            std::transform(model.begin(),model.end(),model.begin(),[](unsigned char c) {return char(std::tolower(c));});
-            if(model=="off") options.manualModel.reset();
-            else if(model=="byte") options.manualModel=SkillChoiceMode::Byte;
-            else if(model=="kilobyte") options.manualModel=SkillChoiceMode::Kilobyte;
-            else if(model=="megabyte") options.manualModel=SkillChoiceMode::Megabyte;
-            else throw std::invalid_argument("--manual accepts Off, Byte, Kilobyte or Megabyte.");
-            if(options.manualModel) options.showUi=false;
-        }
         else if (arg == "--debug") options.debug = true;
         else if (arg == "--ui-only") options.uiOnly = true;
         else if (arg == "--check-models") options.checkModels = true;
@@ -235,19 +203,22 @@ StartupOptions ParseStartupOptions(int argc, const char* const* argv, const char
             // Match-specific metadata also separates same-name hive launches.
             // The actual per-car choice is read from its match configuration.
             const auto value=arg.substr(std::string_view("--byte-skill-mode=").size());
-            if(value.size()!=1 || value[0]<'0' || value[0]>'3') throw std::invalid_argument("Invalid Byte model mode");
+            if(value!="3") throw std::invalid_argument("Only Kilobyte rank mode is supported");
+            options.matchRank = true;
         }
         else if (arg == "--skill" || arg.starts_with("--skill=")) {
             if (requestedSkill) throw std::invalid_argument("Specify --skill only once.");
             if (arg == "--skill") {
-                if (++i == argc) throw std::invalid_argument("--skill requires an integer from 0 to 23.");
+                if (++i == argc) throw std::invalid_argument("--skill requires an integer from 0 to 22.");
                 requestedSkill = argv[i];
             } else requestedSkill = arg.substr(8);
         } else throw std::invalid_argument("Unknown argument. Use --help for startup options.");
     }
     if (options.uiOnly && !options.showUi) throw std::invalid_argument("--ui-only cannot be combined with --no-ui.");
-    if(options.manualModel) {
-        if(requestedSkill) throw std::invalid_argument("--manual cannot be combined with --skill.");
+    if(fullStrengthMegabyte) {
+        if(requestedSkill || options.uiOnly) throw std::invalid_argument("Megabyte has no rank selector; use Kilobyte[Champ I].");
+        options.manualModel=SkillChoiceMode::Megabyte;
+        options.showUi=false;
         options.skillLevel=SkillChoice{*options.manualModel}.Level();
         return options;
     }
@@ -258,6 +229,38 @@ StartupOptions ParseStartupOptions(int argc, const char* const* argv, const char
         else options.skillLevel = savedSkill >= 0 && savedSkill <= MaxSkillLevel ? savedSkill : DefaultSkillLevel;
     }
     return options;
+}
+
+StartupOptions ParseRunCommandOptions(const std::string& command, const char* environmentSkill, int savedSkill) {
+    // The observer receives a command string, whereas inference receives argv.
+    // Split quoted words without consuming ordinary Windows path backslashes,
+    // then use the same option validation and CLI/environment precedence.
+    std::vector<std::string> words;
+    for (size_t i = 0; i < command.size();) {
+        if (std::isspace(static_cast<unsigned char>(command[i]))) { ++i; continue; }
+        std::string word;
+        char quote = 0;
+        for (; i < command.size(); ++i) {
+            const char ch = command[i];
+            if (!quote && std::isspace(static_cast<unsigned char>(ch))) break;
+            if (ch == '\\' && i + 1 < command.size()) {
+                const char next = command[i + 1];
+                if ((!quote && (std::isspace(static_cast<unsigned char>(next)) || next == '"' || next == '\'')) ||
+                    (quote == '"' && next == '"')) {
+                    word += next; ++i; continue;
+                }
+            }
+            if (ch == quote) quote = 0;
+            else if (!quote && (ch == '"' || ch == '\'')) quote = ch;
+            else word += ch;
+        }
+        if (quote) throw std::invalid_argument("Unclosed quote in bot launch command");
+        words.push_back(std::move(word));
+    }
+    if (words.empty()) throw std::invalid_argument("Empty bot launch command");
+    std::vector<const char*> arguments;
+    for (const auto& word : words) arguments.push_back(word.c_str());
+    return ParseStartupOptions(int(arguments.size()), arguments.data(), environmentSkill, savedSkill);
 }
 
 float AutoSkillController::Update(int selectedLevel, int teamScore, int opponentScore, float gameSeconds, int teamSize) {
